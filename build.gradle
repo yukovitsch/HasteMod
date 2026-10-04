@@ -60,7 +60,7 @@ def runGameTestMatrix = { List<Map<String, String>> targets, int concurrency = 2
     println "             RUNNING GAMETEST SUITE MATRIX"
     println "  Targets: ${targets.collect { "${it.loader}:${it.mc}" }.join(', ')}"
     println "  Concurrency: ${concurrency} in parallel"
-    println "============================================================"
+    println "============================================================\n"
 
     def executor = java.util.concurrent.Executors.newFixedThreadPool(concurrency)
     def failures = new java.util.concurrent.CopyOnWriteArrayList<String>()
@@ -251,5 +251,100 @@ tasks.register('smokeTest') {
         println "\n=============================================="
         println "  ALL VERSIONS PASSED SMOKE TESTS SUCCESSFULLY"
         println "==============================================\n"
+    }
+}
+
+def runInteractiveFlow = { List<String> targetMcs, List<String> targetLoaders ->
+    def targets = []
+    targetMcs.each { mc ->
+        targetLoaders.each { l ->
+            targets.add([loader: l, mc: mc])
+        }
+    }
+
+    println "\n============================================================"
+    println "      INTERACTIVE RELEASE JAR TEST RUNNER"
+    println "  Targets to test sequentially (${targets.size()} total):"
+    targets.eachWithIndex { t, idx ->
+        println "    ${idx + 1}. [${t.loader.capitalize()}] Minecraft ${t.mc}"
+    }
+    println "  Auto-load World: saves/gametest (from template-world)"
+    println "  Artifact: Shipped release JAR in mods/"
+    println "============================================================\n"
+
+    targets.eachWithIndex { t, idx ->
+        def loader = t.loader
+        def mcVer = t.mc
+        def tag = "${loader.capitalize()} ${mcVer}"
+
+        println "\n############################################################"
+        println "  [${idx + 1}/${targets.size()}] STARTING ${tag}"
+        println "  Running client with QuickPlay Singleplayer ('gametest')..."
+        println "  * Close the Minecraft window when done testing to continue *"
+        println "############################################################\n"
+
+        def cmd = ['./gradlew', ":${loader}:runClientInteractive".toString(), "-Pmc=${mcVer}".toString(), '--project-cache-dir', ".gradle-${loader}-${mcVer}".toString(), '--no-daemon'] as String[]
+        def pb = new ProcessBuilder(cmd)
+        pb.directory(project.rootDir)
+        pb.inheritIO()
+
+        def proc = pb.start()
+        int exitCode = proc.waitFor()
+
+        if (exitCode != 0) {
+            println "\n⚠ [${tag}] Minecraft exited with code ${exitCode}."
+        } else {
+            println "\n✔ [${tag}] Session ended normally."
+        }
+
+        if (idx < targets.size() - 1) {
+            def nextTarget = targets[idx + 1]
+            println "\n------------------------------------------------------------"
+            println "  Ready for next version: [${nextTarget.loader.capitalize()}] Minecraft ${nextTarget.mc}"
+            print "  Press [ENTER] to launch (or Ctrl+C to abort)... "
+            System.out.flush()
+
+            if (System.console() != null) {
+                System.console().readLine()
+            } else {
+                println "\n  (Console input not attached. Starting next in 3 seconds...)"
+                Thread.sleep(3000)
+            }
+        }
+    }
+
+    println "\n============================================================"
+    println "  ALL INTERACTIVE TEST SESSIONS COMPLETED"
+    println "============================================================\n"
+}
+
+tasks.register('testInteractive') {
+    description = 'Interactively runs Minecraft version by version with shipped release JARs and auto-loads template-world.'
+    group = 'verification'
+
+    doLast {
+        def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
+        def targetLoaders = project.findProperty('loader') ? project.property('loader').toString().split(',').collect { it.trim().toLowerCase() } : ['fabric', 'neoforge']
+        runInteractiveFlow(targetMcs, targetLoaders)
+    }
+}
+
+tasks.register('testInteractiveFabric') {
+    description = 'Interactively runs Fabric across all Minecraft versions (26.1, 26.2, 26.3) with shipped JARs.'
+    group = 'verification'
+
+    doLast {
+        def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
+        runInteractiveFlow(targetMcs, ['fabric'])
+    }
+}
+
+tasks.register('testInteractiveNeoForge') {
+    description = 'Interactively runs NeoForge across all Minecraft versions (26.1, 26.2, 26.3) with shipped JARs.'
+    group = 'verification'
+
+    doLast {
+        def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
+        runInteractiveFlow(targetMcs, ['neoforge'])
     }
 }

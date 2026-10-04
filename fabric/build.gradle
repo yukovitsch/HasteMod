@@ -1,3 +1,6 @@
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+
 plugins {
     id 'net.fabricmc.fabric-loom'
 }
@@ -7,6 +10,10 @@ sourceSets {
         resources {
             srcDir project(":common").sourceSets.main.resources
         }
+    }
+    clientInteractive {
+        compileClasspath = configurations.named('compileClasspath').get()
+        runtimeClasspath = configurations.named('runtimeClasspath').get()
     }
 }
 
@@ -19,7 +26,142 @@ loom {
             runDir "run-gametest-${rootProject.minecraft_version}"
             source sourceSets.test
         }
+        clientInteractive {
+            client()
+            name "Client Interactive Test"
+            runDir "run-interactive-${rootProject.minecraft_version}"
+            source sourceSets.clientInteractive
+            programArg "--quickPlaySingleplayer"
+            programArg "gametest"
+        }
     }
+}
+
+tasks.register('prepareClientInteractiveRun') {
+    dependsOn 'jar'
+    doLast {
+        def targetMc = rootProject.minecraft_version.toString()
+        def runDir = file("run-interactive-${targetMc}")
+        def savesDir = file("${runDir}/saves/gametest")
+        delete(savesDir)
+        savesDir.mkdirs()
+        copy {
+            from rootProject.file("template-world")
+            into savesDir
+        }
+
+        // Clean stale lock and old backup to ensure a clean world start
+        delete(file("${savesDir}/level.dat_old"))
+        delete(file("${savesDir}/session.lock"))
+
+        // Dynamically align level.dat DataVersion and Version.Name to avoid "I know what I'm doing" screen
+        def dataVersionMap = [
+            '26.1': 4786,
+            '26.2': 4903,
+            '26.3': 5023
+        ]
+        def targetDataVer = dataVersionMap[targetMc]
+        def levelDat = file("${savesDir}/level.dat")
+
+        if (levelDat.exists() && targetDataVer != null) {
+            byte[] raw
+            levelDat.withInputStream { is ->
+                new GZIPInputStream(is).withStream { gzipIn ->
+                    raw = gzipIn.bytes
+                }
+            }
+
+            def tagWithPrefix = { int tagType, String tagName ->
+                byte[] nameBytes = tagName.getBytes("UTF-8")
+                ByteArrayOutputStream baos = new ByteArrayOutputStream()
+                baos.write(tagType)
+                baos.write((byte) ((nameBytes.length >> 8) & 0xFF))
+                baos.write((byte) (nameBytes.length & 0xFF))
+                baos.write(nameBytes)
+                return baos.toByteArray()
+            }
+
+            def findPattern = { byte[] src, byte[] pattern ->
+                for (int i = 0; i <= src.length - pattern.length; i++) {
+                    boolean match = true
+                    for (int j = 0; j < pattern.length; j++) {
+                        if (src[i + j] != pattern[j]) {
+                            match = false
+                            break
+                        }
+                    }
+                    if (match) return i
+                }
+                return -1
+            }
+
+            // Update DataVersion: TAG_Int(3) + "DataVersion"
+            byte[] dataVerTag = tagWithPrefix(3, "DataVersion")
+            int posDataVer = findPattern(raw, dataVerTag)
+            if (posDataVer != -1) {
+                int vOff = posDataVer + dataVerTag.length
+                byte[] intBytes = [
+                    (byte) ((targetDataVer >> 24) & 0xFF),
+                    (byte) ((targetDataVer >> 16) & 0xFF),
+                    (byte) ((targetDataVer >> 8) & 0xFF),
+                    (byte) (targetDataVer & 0xFF)
+                ] as byte[]
+                System.arraycopy(intBytes, 0, raw, vOff, 4)
+            }
+
+            // Update Version.Id: TAG_Int(3) + "Id" (exact NBT tag match, will NOT match "modId")
+            byte[] idTag = tagWithPrefix(3, "Id")
+            int posId = findPattern(raw, idTag)
+            if (posId != -1) {
+                int vOff = posId + idTag.length
+                byte[] intBytes = [
+                    (byte) ((targetDataVer >> 24) & 0xFF),
+                    (byte) ((targetDataVer >> 16) & 0xFF),
+                    (byte) ((targetDataVer >> 8) & 0xFF),
+                    (byte) (targetDataVer & 0xFF)
+                ] as byte[]
+                System.arraycopy(intBytes, 0, raw, vOff, 4)
+            }
+
+            // Update Version.Name: TAG_String(8) + "Name" (exact NBT tag match, will NOT match "LevelName")
+            byte[] nameTag = tagWithPrefix(8, "Name")
+            int posName = findPattern(raw, nameTag)
+            if (posName != -1) {
+                int vOff = posName + nameTag.length
+                int oldStrLen = ((raw[vOff] & 0xFF) << 8) | (raw[vOff + 1] & 0xFF)
+                byte[] newNameBytes = targetMc.getBytes("UTF-8")
+
+                ByteArrayOutputStream outStream = new ByteArrayOutputStream()
+                outStream.write(raw, 0, vOff)
+                outStream.write((byte) ((newNameBytes.length >> 8) & 0xFF))
+                outStream.write((byte) (newNameBytes.length & 0xFF))
+                outStream.write(newNameBytes)
+                outStream.write(raw, vOff + 2 + oldStrLen, raw.length - (vOff + 2 + oldStrLen))
+                raw = outStream.toByteArray()
+            }
+
+            levelDat.withOutputStream { os ->
+                new GZIPOutputStream(os).withStream { gzipOut ->
+                    gzipOut.write(raw)
+                    gzipOut.finish()
+                }
+            }
+        }
+
+        // Copy built jar into mods/
+        def modsDir = file("${runDir}/mods")
+        delete(modsDir)
+        modsDir.mkdirs()
+        def builtJar = tasks.named('jar', Jar).get().archiveFile.get().asFile
+        copy {
+            from builtJar
+            into modsDir
+        }
+    }
+}
+
+tasks.matching { it.name == 'runClientInteractive' }.configureEach {
+    dependsOn 'prepareClientInteractiveRun'
 }
 
 dependencies {
