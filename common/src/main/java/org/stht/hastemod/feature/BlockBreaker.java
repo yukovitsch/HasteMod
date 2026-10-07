@@ -64,13 +64,13 @@ public class BlockBreaker {
     }
 
     public void onBlockBreak(BlockPos pos, Minecraft client) {
-        if (client.player == null || client.level == null) return;
-        if (!blockSelEnabled) return;
+        if (client.player == null || client.level == null || !blockSelEnabled || !enabled) return;
 
-        BlockState state = client.level.getBlockState(pos);
-        if (updateBlock(state.getBlock())) {
+        Block block = client.level.getBlockState(pos).getBlock();
+        if (block != this.lastMinedBlock) {
+            this.lastMinedBlock = block;
             client.player.sendSystemMessage(Component.translatable(
-                    "msg.hastemod.selected_block", state.getBlock().getName()));
+                    "msg.hastemod.selected_block", block.getName()));
         }
     }
 
@@ -83,15 +83,11 @@ public class BlockBreaker {
         int currentSlot = client.player.getInventory().getSelectedSlot();
         int targetSlot = -1;
 
-        if (getDestroyProgress(client, currentSlot, state, blockPos) >= 1.0F) {
-            targetSlot = currentSlot;
-        } else {
-            for (int i = 0; i < 9; i++) {
-                if (i == currentSlot) continue;
-                if (getDestroyProgress(client, i, state, blockPos) >= 1.0F) {
-                    targetSlot = i;
-                    break;
-                }
+        for (int i = 0; i < 10; i++) {
+            int slot = (i == 0) ? currentSlot : i - 1;
+            if (getDestroyProgress(client, slot, state, blockPos) >= 1.0F) {
+                targetSlot = slot;
+                break;
             }
         }
 
@@ -189,11 +185,5 @@ public class BlockBreaker {
         }
         out.sort(Comparator.comparingDouble(a -> a.distSqr(p)));
         return out;
-    }
-
-    private boolean updateBlock(Block block) {
-        if (block == this.lastMinedBlock || !enabled) return false;
-        this.lastMinedBlock = block;
-        return true;
     }
 }
