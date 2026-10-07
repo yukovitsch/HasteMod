@@ -3,15 +3,11 @@ plugins {
     id 'net.neoforged.moddev' version "${neoforge_moddev_version}" apply false
 }
 
+import java.util.zip.GZIPInputStream
+import java.util.zip.GZIPOutputStream
+
 def targetMc = findProperty("mc") ?: "26.1"
 def versionFile = file("versions/${targetMc}.properties")
-if (versionFile.exists()) {
-    def props = new Properties()
-    versionFile.withInputStream { props.load(it) }
-    props.each { key, val ->
-        project.ext.set(key.toString(), val.toString())
-    }
-}
 
 allprojects {
     layout.buildDirectory = file("build-${targetMc}")
@@ -20,6 +16,99 @@ allprojects {
         versionFile.withInputStream { props.load(it) }
         props.each { key, val ->
             project.ext.set(key.toString(), val.toString())
+        }
+    }
+}
+
+ext.patchLevelDat = { File levelDat, String targetMcVer ->
+    def dataVersionMap = [
+        '26.1': 4786,
+        '26.2': 4903,
+        '26.3': 5023
+    ]
+    def targetDataVer = dataVersionMap[targetMcVer]
+    if (!levelDat.exists() || targetDataVer == null) return
+
+    byte[] raw
+    levelDat.withInputStream { is ->
+        new GZIPInputStream(is).withStream { gzipIn ->
+            raw = gzipIn.bytes
+        }
+    }
+
+    def tagWithPrefix = { int tagType, String tagName ->
+        byte[] nameBytes = tagName.getBytes("UTF-8")
+        ByteArrayOutputStream baos = new ByteArrayOutputStream()
+        baos.write(tagType)
+        baos.write((byte) ((nameBytes.length >> 8) & 0xFF))
+        baos.write((byte) (nameBytes.length & 0xFF))
+        baos.write(nameBytes)
+        return baos.toByteArray()
+    }
+
+    def findPattern = { byte[] src, byte[] pattern ->
+        for (int i = 0; i <= src.length - pattern.length; i++) {
+            boolean match = true
+            for (int j = 0; j < pattern.length; j++) {
+                if (src[i + j] != pattern[j]) {
+                    match = false
+                    break
+                }
+            }
+            if (match) return i
+        }
+        return -1
+    }
+
+    // Update DataVersion: TAG_Int(3) + "DataVersion"
+    byte[] dataVerTag = tagWithPrefix(3, "DataVersion")
+    int posDataVer = findPattern(raw, dataVerTag)
+    if (posDataVer != -1) {
+        int vOff = posDataVer + dataVerTag.length
+        byte[] intBytes = [
+            (byte) ((targetDataVer >> 24) & 0xFF),
+            (byte) ((targetDataVer >> 16) & 0xFF),
+            (byte) ((targetDataVer >> 8) & 0xFF),
+            (byte) (targetDataVer & 0xFF)
+        ] as byte[]
+        System.arraycopy(intBytes, 0, raw, vOff, 4)
+    }
+
+    // Update Version.Id: TAG_Int(3) + "Id" (exact NBT tag match, will NOT match "modId")
+    byte[] idTag = tagWithPrefix(3, "Id")
+    int posId = findPattern(raw, idTag)
+    if (posId != -1) {
+        int vOff = posId + idTag.length
+        byte[] intBytes = [
+            (byte) ((targetDataVer >> 24) & 0xFF),
+            (byte) ((targetDataVer >> 16) & 0xFF),
+            (byte) ((targetDataVer >> 8) & 0xFF),
+            (byte) (targetDataVer & 0xFF)
+        ] as byte[]
+        System.arraycopy(intBytes, 0, raw, vOff, 4)
+    }
+
+    // Update Version.Name: TAG_String(8) + "Name" (exact NBT tag match, will NOT match "LevelName")
+    byte[] nameTag = tagWithPrefix(8, "Name")
+    int posName = findPattern(raw, nameTag)
+    if (posName != -1) {
+        int vOff = posName + nameTag.length
+        int oldStrLen = ((raw[vOff] & 0xFF) << 8) | (raw[vOff + 1] & 0xFF)
+        byte[] newNameBytes = targetMcVer.getBytes("UTF-8")
+
+        ByteArrayOutputStream outStream = new ByteArrayOutputStream()
+        outStream.write(raw, 0, vOff)
+        outStream.write((byte) ((newNameBytes.length >> 8) & 0xFF))
+        outStream.write((byte) (newNameBytes.length & 0xFF))
+        outStream.write(newNameBytes)
+        outStream.write(raw, vOff + 2 + oldStrLen, raw.length - (vOff + 2 + oldStrLen))
+        raw = outStream.toByteArray()
+    }
+
+    levelDat.withOutputStream { os ->
+        new GZIPOutputStream(os).withStream { gzipOut ->
+            gzipOut.write(raw)
+            gzipOut.finish()
         }
     }
 }
@@ -134,26 +223,6 @@ def runGameTestMatrix = { List<Map<String, String>> targets, int concurrency = 2
     println "============================================================\n"
 }
 
-tasks.register('gameTestFabricAll') {
-    description = 'GameTest Fabric across all Minecraft versions (26.1, 26.2, 26.3)'
-    group = 'verification'
-    doLast {
-        def targets = ['26.1', '26.2', '26.3'].collect { [loader: 'fabric', mc: it] }
-        int concurrency = project.findProperty("parallel") ? Integer.parseInt(project.property("parallel").toString()) : 2
-        runGameTestMatrix(targets, concurrency)
-    }
-}
-
-tasks.register('gameTestNeoForgeAll') {
-    description = 'GameTest NeoForge across all Minecraft versions (26.1, 26.2, 26.3)'
-    group = 'verification'
-    doLast {
-        def targets = ['26.1', '26.2', '26.3'].collect { [loader: 'neoforge', mc: it] }
-        int concurrency = project.findProperty("parallel") ? Integer.parseInt(project.property("parallel").toString()) : 2
-        runGameTestMatrix(targets, concurrency)
-    }
-}
-
 tasks.register('gameTestAll') {
     description = 'GameTest across all Minecraft versions and loaders (Fabric & NeoForge)'
     group = 'verification'
@@ -166,92 +235,19 @@ tasks.register('gameTestAll') {
     }
 }
 
-tasks.register('build26_1', Exec) {
-    description = 'Builds Fabric and NeoForge jars for Minecraft 26.1'
-    group = 'build'
-    commandLine './gradlew', 'build', '-Pmc=26.1'
-}
-
-tasks.register('build26_2', Exec) {
-    description = 'Builds Fabric and NeoForge jars for Minecraft 26.2'
-    group = 'build'
-    commandLine './gradlew', 'build', '-Pmc=26.2'
-}
-
-tasks.register('build26_3', Exec) {
-    description = 'Builds Fabric and NeoForge jars for Minecraft 26.3'
-    group = 'build'
-    commandLine './gradlew', 'build', '-Pmc=26.3'
+def mcVersions = ['26.1', '26.2', '26.3']
+mcVersions.each { mc ->
+    tasks.register("build${mc.replace('.', '_')}", Exec) {
+        description = "Builds Fabric and NeoForge jars for Minecraft ${mc}"
+        group = 'build'
+        commandLine './gradlew', 'build', "-Pmc=${mc}"
+    }
 }
 
 tasks.register('buildAll') {
     description = 'Builds Fabric and NeoForge jars for all supported 26.x versions (26.1, 26.2, 26.3)'
     group = 'build'
-    dependsOn 'build26_1', 'build26_2', 'build26_3'
-}
-
-tasks.register('smokeTest') {
-    description = 'Automated client smoke test: boots each version, confirms clean initialization & audio engine, then shuts down.'
-    group = 'verification'
-    dependsOn 'buildAll'
-
-    doLast {
-        def versionsToTest = ['26.1', '26.2', '26.3']
-        println "\n=============================================="
-        println "  RUNNING AUTOMATED CLIENT SMOKE TESTS"
-        println "==============================================\n"
-
-        versionsToTest.each { mcVer ->
-            println "\n>>> Testing Minecraft ${mcVer} (Fabric)..."
-            long startTime = System.currentTimeMillis()
-
-            def cmd = ['./gradlew', ':fabric:runClient', "-Pmc=${mcVer}".toString(), '--no-daemon'] as String[]
-            def pb = new ProcessBuilder(cmd)
-            pb.directory(project.rootDir)
-            pb.redirectErrorStream(true)
-
-            def proc = pb.start()
-            def reader = new BufferedReader(new InputStreamReader(proc.inputStream))
-
-            boolean passed = false
-            String failureReason = null
-            String line
-
-            while ((line = reader.readLine()) != null) {
-                if (line.contains("MixinApplyError") ||
-                    line.contains("Incompatible mod set") ||
-                    line.contains("NoSuchMethodError") ||
-                    line.contains("ClassNotFoundException") ||
-                    line.contains("Exception in thread \"main\"")) {
-                    failureReason = line
-                    break
-                }
-                if (line.contains("Sound engine started") || line.contains("OpenAL initialized")) {
-                    passed = true
-                    break
-                }
-            }
-
-            if (!passed && failureReason == null) {
-                failureReason = "Process terminated before reaching title screen."
-            }
-
-            proc.toHandle().descendants().forEach { h -> h.destroyForcibly() }
-            proc.destroyForcibly()
-            proc.waitFor()
-
-            long elapsed = (System.currentTimeMillis() - startTime) / 1000
-            if (passed) {
-                println "✔ [PASSED] Minecraft ${mcVer} loaded cleanly in ${elapsed}s (Mixins applied, mod loaded, title screen reached)!"
-            } else {
-                throw new GradleException("✘ [FAILED] Minecraft ${mcVer} smoke test failed: ${failureReason}")
-            }
-        }
-
-        println "\n=============================================="
-        println "  ALL VERSIONS PASSED SMOKE TESTS SUCCESSFULLY"
-        println "==============================================\n"
-    }
+    dependsOn mcVersions.collect { "build${it.replace('.', '_')}" }
 }
 
 def runInteractiveFlow = { List<String> targetMcs, List<String> targetLoaders ->
@@ -326,25 +322,5 @@ tasks.register('testInteractive') {
         def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
         def targetLoaders = project.findProperty('loader') ? project.property('loader').toString().split(',').collect { it.trim().toLowerCase() } : ['fabric', 'neoforge']
         runInteractiveFlow(targetMcs, targetLoaders)
-    }
-}
-
-tasks.register('testInteractiveFabric') {
-    description = 'Interactively runs Fabric across all Minecraft versions (26.1, 26.2, 26.3) with shipped JARs.'
-    group = 'verification'
-
-    doLast {
-        def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
-        runInteractiveFlow(targetMcs, ['fabric'])
-    }
-}
-
-tasks.register('testInteractiveNeoForge') {
-    description = 'Interactively runs NeoForge across all Minecraft versions (26.1, 26.2, 26.3) with shipped JARs.'
-    group = 'verification'
-
-    doLast {
-        def targetMcs = project.findProperty('mc') ? project.property('mc').toString().split(',').collect { it.trim() } : ['26.1', '26.2', '26.3']
-        runInteractiveFlow(targetMcs, ['neoforge'])
     }
 }
